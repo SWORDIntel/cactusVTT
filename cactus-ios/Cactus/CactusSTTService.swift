@@ -25,6 +25,17 @@ public class CactusSTTService: NSObject, AudioInputManagerDelegate {
     // Pointer to the native STT context
     private var sttContext: UnsafeMutablePointer<cactus_stt_context_t>? = nil
 
+    // --- Streaming API Members ---
+    // Callbacks provided by the user for the active stream
+    private var onPartialResultStreamingCallback: ((String) -> Void)?
+    private var onFinalResultStreamingCallback: ((Result<String, Error>) -> Void)?
+
+    // To pass 'self' to C callbacks. Must be managed carefully.
+    private var streamUserSelfData: UnsafeMutableRawPointer?
+
+    public var isStreaming: Bool = false
+    // --- End Streaming API Members ---
+
     /// Returns true if the STT service has been initialized with a model.
     public var isInitialized: Bool {
         return sttContext != nil
@@ -160,6 +171,84 @@ public class CactusSTTService: NSObject, AudioInputManagerDelegate {
         }
     }
 
+    /// Processes a list of audio samples using specified advanced options and returns the transcription.
+    ///
+    /// - Parameters:
+    ///   - samples: An array of `Float` audio samples (PCM 32-bit, 16kHz, mono).
+    ///   - options: Optional `SttOptions` to customize STT processing.
+    ///   - completion: A closure called with the `Result` of the transcription,
+    ///                 containing either the transcribed `String` or an `Error`.
+    public func processAudioSamples(
+        samples: [Float],
+        options: SttOptions? = nil,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        guard let context = self.sttContext else {
+            completion(.failure(STTError.notInitialized))
+            return
+        }
+
+        if samples.isEmpty {
+            print("[CactusSTTService] Audio samples array is empty.")
+            completion(.success("")) // Or specific error/behavior for empty samples
+            return
+        }
+
+        let success: Bool
+        if let opts = options {
+            var nativeParams: cactus_stt_processing_params_c_t = cactus_stt_default_processing_params_c()
+
+            // Override with user-provided options
+            if let nThreads = opts.nThreads { nativeParams.n_threads = nThreads }
+            if let tokenTimestamps = opts.tokenTimestamps { nativeParams.token_timestamps = tokenTimestamps }
+            if let temperature = opts.temperature { nativeParams.temperature = temperature }
+            if let speedUp = opts.speedUp { nativeParams.speed_up = speedUp }
+            if let audioCtx = opts.audioCtx { nativeParams.audio_ctx = audioCtx }
+            if let maxLen = opts.maxLen { nativeParams.max_len = maxLen }
+            if let maxTokens = opts.maxTokens { nativeParams.max_tokens = maxTokens }
+            if let noContext = opts.noContext { nativeParams.no_context = noContext }
+
+            success = samples.withUnsafeBufferPointer { bufferPtr in
+                guard let baseAddress = bufferPtr.baseAddress else {
+                    // This case should ideally not happen if samples.isEmpty is checked.
+                    return false
+                }
+                return cactus_stt_process_audio_with_params_c(
+                    context,
+                    baseAddress,
+                    UInt32(samples.count),
+                    &nativeParams // Pass pointer to the C struct
+                )
+            }
+        } else {
+            success = samples.withUnsafeBufferPointer { bufferPtr in
+                guard let baseAddress = bufferPtr.baseAddress else {
+                    return false
+                }
+                return cactus_stt_process_audio( // Existing FFI call for default params
+                    context,
+                    baseAddress,
+                    UInt32(samples.count)
+                )
+            }
+        }
+
+        if success {
+            if let transcriptCString = cactus_stt_get_transcription(context) {
+                let transcript = String(cString: transcriptCString)
+                cactus_free_string_c(transcriptCString)
+                completion(.success(transcript))
+            } else {
+                // This case might mean successful processing but no speech, or an error in getting text.
+                // Depending on desired behavior, could be .success("") or a specific error.
+                completion(.success(""))
+            }
+        } else {
+            completion(.failure(STTError.processingFailed("Native STT processing returned failure.")))
+        }
+    }
+
+
     /// Releases resources used by the STT engine.
     ///
     /// This method should be called when STT functionality is no longer needed.
@@ -273,18 +362,185 @@ public enum STTError: Error, LocalizedError {
     case unknown(String)
     /// A specific feature (like setUserVocabulary) is not yet fully implemented.
     case featureNotImplemented(String)
+    /// Attempted to start a stream when one is already active.
+    case streamAlreadyActive
+    /// Attempted an operation that requires an active stream, but none exists.
+    case streamNotActive
+    /// Failed to start a new stream at the native layer.
+    case streamStartFailed
+    /// Failed to finalize a stream at the native layer.
+    case streamFinishFailed
+    /// Failed to feed audio to an active stream.
+    case streamFeedAudioFailed
+
 
     /// Provides a localized description for each `STTError` case.
     public var errorDescription: String? {
         switch self {
         case .notInitialized: return "STT Service is not initialized. Call initSTT() first."
-        case .alreadyCapturing: return "Voice capture is already in progress."
+        case .alreadyCapturing: return "Voice capture is already in progress (non-stream related)."
         case .permissionDenied: return "Microphone permission was denied."
         case .initializationFailed(let msg): return "STT engine initialization failed: \(msg)"
         case .processingFailed(let msg): return "STT processing failed: \(msg)"
         case .audioRecordingFailed(let err): return "Audio recording failed: \(err.localizedDescription)"
         case .unknown(let msg): return "An unknown STT error occurred: \(msg)"
         case .featureNotImplemented(let featureName): return "\(featureName) is not yet implemented at the core C++ level."
+        case .streamAlreadyActive: return "A streaming session is already active. Finish the current one before starting a new one."
+        case .streamNotActive: return "No active streaming session found for this operation."
+        case .streamStartFailed: return "Failed to start the STT stream at the native layer."
+        case .streamFinishFailed: return "Failed to finalize the STT stream at the native layer."
+        case .streamFeedAudioFailed: return "Failed to feed audio to the STT stream at the native layer."
         }
+    }
+
+    // MARK: - Streaming STT Methods
+
+    public func startStreamingSTT(
+        options: SttOptions? = nil,
+        onPartialResult: @escaping (String) -> Void,
+        onFinalResult: @escaping (Result<String, Error>) -> Void
+    ) throws {
+        guard let context = self.sttContext else {
+            throw STTError.notInitialized
+        }
+        if isStreaming {
+            throw STTError.streamAlreadyActive
+        }
+
+        self.onPartialResultStreamingCallback = onPartialResult
+        self.onFinalResultStreamingCallback = onFinalResult
+
+        var nativeParams: cactus_stt_processing_params_c_t = cactus_stt_default_processing_params_c()
+        if let opts = options {
+            if let nThreads = opts.nThreads { nativeParams.n_threads = nThreads }
+            if let tokenTimestamps = opts.tokenTimestamps { nativeParams.token_timestamps = tokenTimestamps }
+            if let temperature = opts.temperature { nativeParams.temperature = temperature }
+            if let speedUp = opts.speedUp { nativeParams.speed_up = speedUp }
+            if let audioCtx = opts.audioCtx { nativeParams.audio_ctx = audioCtx }
+            if let maxLen = opts.maxLen { nativeParams.max_len = maxLen }
+            if let maxTokens = opts.maxTokens { nativeParams.max_tokens = maxTokens }
+            if let noContext = opts.noContext { nativeParams.no_context = noContext }
+        }
+
+        // Pass 'self' as user_data for the C callbacks
+        self.streamUserSelfData = Unmanaged.passRetained(self).toOpaque()
+
+        let cPartialCallback: stt_partial_result_callback_c_t = { (transcriptCString, userData) -> Void in
+            guard let userData = userData else { return }
+            let serviceInstance = Unmanaged<CactusSTTService>.fromOpaque(userData).takeUnretainedValue()
+            if let cstr = transcriptCString {
+                serviceInstance.onPartialResultStreamingCallback?(String(cString: cstr))
+            }
+        }
+
+        let cFinalCallback: stt_final_result_callback_c_t = { (transcriptCString, userData) -> Void in
+            guard let userData = userData else { return }
+            let serviceInstance = Unmanaged<CactusSTTService>.fromOpaque(userData).takeRetainedValue() // Retain for this scope, then release
+
+            if let cstr = transcriptCString {
+                serviceInstance.onFinalResultStreamingCallback?(.success(String(cString: cstr)))
+            } else {
+                serviceInstance.onFinalResultStreamingCallback?(.failure(STTError.transcriptionFailed))
+            }
+
+            // Clean up after final callback
+            serviceInstance.isStreaming = false
+            serviceInstance.streamUserSelfData = nil // pointer already released by takeRetainedValue +ARC
+            serviceInstance.onPartialResultStreamingCallback = nil // Clear callbacks
+            serviceInstance.onFinalResultStreamingCallback = nil
+        }
+
+        let success = cactus_stt_stream_start_c(
+            context,
+            &nativeParams,
+            cPartialCallback,
+            self.streamUserSelfData,
+            cFinalCallback,
+            self.streamUserSelfData
+        )
+
+        if success {
+            self.isStreaming = true
+        } else {
+            if let data = self.streamUserSelfData {
+                Unmanaged.fromOpaque(data).release() // Release if start failed
+                self.streamUserSelfData = nil
+            }
+            self.onPartialResultStreamingCallback = nil
+            self.onFinalResultStreamingCallback = nil
+            throw STTError.streamStartFailed
+        }
+    }
+
+    public func feedAudioChunk(samples: [Float]) throws {
+        guard let context = self.sttContext else {
+            throw STTError.notInitialized
+        }
+        guard self.isStreaming else {
+            throw STTError.streamNotActive
+        }
+
+        let success = samples.withUnsafeBufferPointer { bufferPointer -> Bool in
+            guard let baseAddress = bufferPointer.baseAddress else {
+                return cactus_stt_stream_feed_audio_c(context, nil, 0) // num_samples = 0
+            }
+            return cactus_stt_stream_feed_audio_c(
+                context,
+                baseAddress,
+                UInt32(samples.count)
+            )
+        }
+
+        if !success {
+            // If feed fails, we might want to notify the final callback with an error
+            // and clean up the stream.
+            self.onFinalResultStreamingCallback?(.failure(STTError.streamFeedAudioFailed))
+            if let data = self.streamUserSelfData {
+                 Unmanaged.fromOpaque(data).release()
+                 self.streamUserSelfData = nil
+            }
+            self.isStreaming = false
+            self.onPartialResultStreamingCallback = nil
+            self.onFinalResultStreamingCallback = nil
+            throw STTError.streamFeedAudioFailed
+        }
+    }
+
+    public func stopStreamingSTT() throws {
+        guard let context = self.sttContext else {
+            if isStreaming {
+                 self.onFinalResultStreamingCallback?(.failure(STTError.notInitialized))
+                 if let data = self.streamUserSelfData { Unmanaged.fromOpaque(data).release(); self.streamUserSelfData = nil; }
+            }
+            self.isStreaming = false; self.onPartialResultStreamingCallback = nil; self.onFinalResultStreamingCallback = nil;
+            if sttContext == nil { return } // Already cleaned up or never init
+            throw STTError.notInitialized // If context became null while streaming was true (should not happen)
+        }
+
+        guard self.isStreaming else {
+             if self.onFinalResultStreamingCallback != nil {
+                self.onFinalResultStreamingCallback?(.failure(STTError.streamNotActive))
+             }
+             if let data = self.streamUserSelfData { Unmanaged.fromOpaque(data).release(); self.streamUserSelfData = nil; }
+             self.isStreaming = false; self.onPartialResultStreamingCallback = nil; self.onFinalResultStreamingCallback = nil;
+            return
+        }
+
+        // Native call to finish the stream. The final callback will be triggered from C.
+        let success = cactus_stt_stream_finish_c(context)
+
+        // If the native call itself fails, the C callback might not be called.
+        // So, we need to ensure cleanup and error reporting here.
+        if !success {
+            self.onFinalResultStreamingCallback?(.failure(STTError.streamFinishFailed))
+            if let data = self.streamUserSelfData {
+                Unmanaged.fromOpaque(data).release()
+                self.streamUserSelfData = nil
+            }
+            self.isStreaming = false
+            self.onPartialResultStreamingCallback = nil
+            self.onFinalResultStreamingCallback = nil
+        }
+        // Note: isStreaming and callback cleanup for the success case is handled by the C final callback's Swift side.
     }
 }
