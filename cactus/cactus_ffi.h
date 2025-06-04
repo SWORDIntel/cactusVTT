@@ -170,6 +170,21 @@ typedef struct cactus_formatted_chat_result_c {
 // then cactus_stt_context_t should be an opaque pointer.
 typedef struct cactus_stt_context cactus_stt_context_t;
 
+/**
+ * @brief C-compatible structure for advanced STT processing parameters.
+ * Mirrors the C++ `cactus::STTAdvancedParams` struct.
+ */
+typedef struct cactus_stt_processing_params_c {
+    int32_t n_threads;          ///< Number of threads to use.
+    bool token_timestamps;      ///< Enable token-level timestamps.
+    float temperature;          ///< Temperature for sampling.
+    bool speed_up;              ///< Speed up audio processing (2x).
+    int32_t audio_ctx;          ///< Audio context size (0 for full).
+    int32_t max_len;            ///< Max segment length in characters (0 for no limit).
+    int32_t max_tokens;         ///< Max tokens per segment (0 for no limit).
+    bool no_context;            ///< If true, do not use context from previous audio.
+} cactus_stt_processing_params_c_t;
+
 // Initializes an STT context with the specified model.
 // model_path: Path to the ggml Whisper model file.
 // language: Language code (e.g., "en").
@@ -204,6 +219,95 @@ CACTUS_FFI_EXPORT void cactus_stt_free(cactus_stt_context_t* ctx);
  *                   Pass NULL or an empty string to clear any previously set vocabulary.
  */
 CACTUS_FFI_EXPORT void cactus_stt_set_user_vocabulary(cactus_stt_context_t* ctx, const char* vocabulary);
+
+/**
+ * @brief Returns a default set of STT processing parameters.
+ */
+CACTUS_FFI_EXPORT cactus_stt_processing_params_c_t cactus_stt_default_processing_params_c();
+
+/**
+ * @brief Processes a chunk of audio data using specified advanced parameters.
+ *
+ * @param ctx Pointer to the STT context.
+ * @param samples Pointer to an array of float audio samples (PCM 32-bit, 16kHz, mono).
+ * @param num_samples Number of samples in the array.
+ * @param params_c Pointer to the advanced processing parameters.
+ * @return true on success, false on failure.
+ */
+CACTUS_FFI_EXPORT bool cactus_stt_process_audio_with_params_c(
+    cactus_stt_context_t* ctx,
+    const float* samples,
+    uint32_t num_samples,
+    const cactus_stt_processing_params_c_t* params_c
+);
+
+// --- Streaming STT FFI Functions ---
+
+/**
+ * @brief Callback type for partial transcription results during streaming.
+ * @param transcript The partial transcript segment (UTF-8 C-string).
+ * @param user_data Custom user data pointer passed to cactus_stt_stream_start_c.
+ */
+typedef void (*stt_partial_result_callback_c_t)(const char* transcript, void* user_data);
+
+/**
+ * @brief Callback type for the final transcription result when a stream is finished.
+ * @param transcript The final accumulated transcript (UTF-8 C-string).
+ * @param user_data Custom user data pointer passed to cactus_stt_stream_start_c.
+ */
+typedef void (*stt_final_result_callback_c_t)(const char* transcript, void* user_data);
+
+/**
+ * @brief Starts a new STT streaming session.
+ *
+ * Initializes the stream with advanced parameters and sets up callbacks for results.
+ * The STT context (`ctx`) must have been previously initialized with `cactus_stt_init`.
+ *
+ * @param ctx Pointer to the STT context.
+ * @param params_c Pointer to the advanced processing parameters for this stream.
+ * @param partial_callback Function pointer for partial transcription results. Can be NULL.
+ * @param partial_callback_user_data User data pointer to be passed to partial_callback.
+ * @param final_callback Function pointer for the final transcription result. Can be NULL.
+ * @param final_callback_user_data User data pointer to be passed to final_callback.
+ * @return true if the stream started successfully, false otherwise.
+ */
+CACTUS_FFI_EXPORT bool cactus_stt_stream_start_c(
+    cactus_stt_context_t* ctx,
+    const cactus_stt_processing_params_c_t* params_c,
+    stt_partial_result_callback_c_t partial_callback,
+    void* partial_callback_user_data,
+    stt_final_result_callback_c_t final_callback,
+    void* final_callback_user_data
+);
+
+/**
+ * @brief Feeds a chunk of audio data to the active STT stream.
+ *
+ * Should only be called after a stream has been successfully started with `cactus_stt_stream_start_c`.
+ *
+ * @param ctx Pointer to the STT context.
+ * @param audio_data Pointer to an array of float audio samples (PCM 32-bit, 16kHz, mono).
+ * @param num_samples Number of samples in the audio_data array.
+ * @return true if the audio chunk was accepted and processed (or buffered), false on error or if not streaming.
+ */
+CACTUS_FFI_EXPORT bool cactus_stt_stream_feed_audio_c(
+    cactus_stt_context_t* ctx,
+    const float* audio_data,
+    uint32_t num_samples
+);
+
+/**
+ * @brief Signals the end of the audio stream and processes any remaining audio.
+ *
+ * Should only be called after a stream has been successfully started.
+ * This call will trigger the `stt_final_result_callback_c_t` with the full accumulated transcription.
+ *
+ * @param ctx Pointer to the STT context.
+ * @return true if the stream was finished successfully, false on error or if not streaming.
+ */
+CACTUS_FFI_EXPORT bool cactus_stt_stream_finish_c(
+    cactus_stt_context_t* ctx
+);
 
 // --- End Speech-to-Text (STT) FFI Definitions ---
 
