@@ -1,44 +1,55 @@
 import UIKit
-import AVFoundation // For AVAudioSession setup if needed, though STTService might handle it
-import Cactus // Assuming your XCFramework and Swift wrappers are bundled under this module name
+import AVFoundation
+import Cactus // Assumes SttOptions is available via this import
+
+// Helper to get a C-style function pointer for callbacks
+// Not strictly needed if using @convention(c) closures directly where FFI function is called
+// typealias SttPartialCallbackType = @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+// typealias SttFinalCallbackType = @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+
 
 class ViewController: UIViewController {
 
     private var cactusSTTService: CactusSTTService?
-    private var isRecording = false
+    // private var isRecording = false // Replaced by isStreamingActive
 
-    lazy var recordButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("Start Recording", for: .normal)
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
-        button.addTarget(self, action: #selector(recordButtonTapped), for: .touchUpInside)
-        button.backgroundColor = .systemBlue
-        button.setTitleColor(.white, for: .normal)
-        button.layer.cornerRadius = 8
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }()
+    // --- UI Elements ---
+    lazy var statusLabel: UILabel = { /* ... */ }()
+    lazy var vocabularyTextField: UITextField = { /* ... */ }()
+    lazy var setVocabularyButton: UIButton = { /* ... */ }()
 
-    lazy var transcriptionTextView: UITextView = {
-        let textView = UITextView()
-        textView.font = UIFont.systemFont(ofSize: 16)
-        textView.isEditable = false
-        textView.layer.borderColor = UIColor.lightGray.cgColor
-        textView.layer.borderWidth = 1.0
-        textView.layer.cornerRadius = 5
-        textView.translatesAutoresizingMaskIntoConstraints = false
-        return textView
-    }()
+    // Renaming recordButton to make its function clear for streaming
+    lazy var streamRecordButton: UIButton = { /* ... */ }()
 
-    lazy var statusLabel: UILabel = {
-        let label = UILabel()
-        label.text = "Initialize STT and grant permissions."
-        label.textAlignment = .center
-        label.numberOfLines = 0
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }()
+    lazy var transcriptionTextView: UITextView = { /* ... */ }() // For final non-streaming results primarily
 
+    // New UI for STT Options
+    lazy var tokenTimestampsSwitch: UISwitch = { self.createSwitch(title: "Token Timestamps") }()
+    lazy var noContextSwitch: UISwitch = { self.createSwitch(title: "No Context", isOn: true) }()
+    lazy var speedUpSwitch: UISwitch = { self.createSwitch(title: "Speed Up") }()
+    lazy var temperatureSlider: UISlider = { self.createSlider(min: 0.0, max: 1.0, initial: 0.0) }()
+    lazy var temperatureLabel: UILabel = { self.createLabel(text: "Temp: 0.0") }()
+
+    // New UI for Streaming Transcripts
+    lazy var partialTranscriptLabel: UILabel = { self.createLabel(text: "Partial: ", textAlignment: .left) }()
+    lazy var finalStreamTranscriptLabel: UILabel = { self.createLabel(text: "Final (Stream): ", textAlignment: .left, weight: .bold) }()
+
+    // Button for processing a dummy buffer with options (simulates "process last recording")
+    lazy var processBufferButton: UIButton = { self.createButton(title: "Process Buffer w/ Options") }()
+
+    // --- STT State ---
+    var sttOptions = SttOptions() // Initialize with default SttOptions
+    var isStreamingActive = false
+
+    // --- Audio Engine for Streaming ---
+    let audioEngine = AVAudioEngine()
+    var audioInputNode: AVAudioInputNode! // Implicitly unwrapped optional
+
+    // Store self for C callbacks. Must be managed carefully.
+    private var streamUserSelfData: UnsafeMutableRawPointer?
+
+
+    // MARK: - Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .white
@@ -46,39 +57,183 @@ class ViewController: UIViewController {
 
         setupUI()
         initializeSTT()
+        setupAudioEngine() // Setup audio engine after STT init (or before, if STT doesn't need it at init)
+
+        // Add targets for new UI elements
+        tokenTimestampsSwitch.addTarget(self, action: #selector(sttOptionChanged(_:)), for: .valueChanged)
+        noContextSwitch.addTarget(self, action: #selector(sttOptionChanged(_:)), for: .valueChanged)
+        speedUpSwitch.addTarget(self, action: #selector(sttOptionChanged(_:)), for: .valueChanged)
+        temperatureSlider.addTarget(self, action: #selector(sttOptionChanged(_:)), for: .valueChanged)
+        processBufferButton.addTarget(self, action: #selector(processDummyBufferTapped), for: .touchUpInside)
+
     }
 
+    deinit {
+        if let context = sttContext { // Use the stored sttContext
+            cactusSTTService?.releaseSTT(completion: { error in // Ensure this calls the FFI free correctly
+                if let error = error {
+                    print("Error releasing STT: \(error.localizedDescription)")
+                } else {
+                    print("STT resources released.")
+                }
+            })
+        }
+        if let userData = streamUserSelfData {
+            Unmanaged.fromOpaque(userData).release()
+        }
+    }
+
+    // MARK: - UI Setup
+    private func createLabel(text: String, textAlignment: NSTextAlignment = .center, weight: UIFont.Weight = .regular) -> UILabel {
+        let label = UILabel()
+        label.text = text
+        label.textAlignment = textAlignment
+        label.numberOfLines = 0
+        label.font = UIFont.systemFont(ofSize: 14, weight: weight)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
+    private func createSwitch(title: String, isOn: Bool = false) -> UISwitch {
+        let uiSwitch = UISwitch()
+        uiSwitch.isOn = isOn
+        // We'll handle actions via addTarget in viewDidLoad
+        uiSwitch.translatesAutoresizingMaskIntoConstraints = false
+        // For layout purposes, often a Switch is part of a horizontal stack with a UILabel
+        return uiSwitch
+    }
+
+    private func createSlider(min: Float, max: Float, initial: Float) -> UISlider {
+        let slider = UISlider()
+        slider.minimumValue = min
+        slider.maximumValue = max
+        slider.value = initial
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        return slider
+    }
+
+    private func createButton(title: String) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = UIFont.systemFont(ofSize: 16)
+        button.backgroundColor = .systemGray5
+        button.setTitleColor(.systemBlue, for: .normal)
+        button.layer.cornerRadius = 8
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
+    }
+
+
     private func setupUI() {
-        view.addSubview(recordButton)
-        view.addSubview(transcriptionTextView)
+        // Initializing UI elements (some were lazy vars, ensure they are configured)
+        statusLabel = createLabel(text: "Initialize STT...")
+        vocabularyTextField = UITextField()
+        vocabularyTextField.placeholder = "Enter STT vocabulary (optional)"
+        vocabularyTextField.borderStyle = .roundedRect
+        vocabularyTextField.translatesAutoresizingMaskIntoConstraints = false
+
+        setVocabularyButton = createButton(title: "Set Vocabulary")
+        setVocabularyButton.addTarget(self, action: #selector(setVocabularyButtonTapped), for: .touchUpInside)
+
+        streamRecordButton = createButton(title: "Start Streaming")
+        streamRecordButton.addTarget(self, action: #selector(streamRecordButtonTapped), for: .touchUpInside)
+        streamRecordButton.backgroundColor = .systemGreen
+
+        transcriptionTextView = UITextView()
+        transcriptionTextView.font = UIFont.systemFont(ofSize: 16)
+        transcriptionTextView.isEditable = false
+        transcriptionTextView.layer.borderColor = UIColor.lightGray.cgColor
+        transcriptionTextView.layer.borderWidth = 1.0
+        transcriptionTextView.layer.cornerRadius = 5
+        transcriptionTextView.translatesAutoresizingMaskIntoConstraints = false
+
+        partialTranscriptLabel = createLabel(text: "Partial: ", textAlignment: .left)
+        finalStreamTranscriptLabel = createLabel(text: "Final (Stream): ", textAlignment: .left, weight: .bold)
+        processBufferButton = createButton(title: "Process Buffer w/ Options")
+
+
+        let tempStack = UIStackView(arrangedSubviews: [temperatureLabel, temperatureSlider])
+        tempStack.axis = .horizontal
+        tempStack.spacing = 8
+        tempStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let optionsStackView = UIStackView(arrangedSubviews: [
+            createHorizontalStack([createLabel(text: "Token Timestamps:"), tokenTimestampsSwitch]),
+            createHorizontalStack([createLabel(text: "No Context:"), noContextSwitch]),
+            createHorizontalStack([createLabel(text: "Speed Up:"), speedUpSwitch]),
+            tempStack
+        ])
+        optionsStackView.axis = .vertical
+        optionsStackView.spacing = 8
+        optionsStackView.translatesAutoresizingMaskIntoConstraints = false
+
         view.addSubview(statusLabel)
+        view.addSubview(vocabularyTextField)
+        view.addSubview(setVocabularyButton)
+        view.addSubview(optionsStackView)
+        view.addSubview(streamRecordButton)
+        view.addSubview(processBufferButton)
+        view.addSubview(partialTranscriptLabel)
+        view.addSubview(finalStreamTranscriptLabel)
+        view.addSubview(transcriptionTextView) // For non-streaming results
+
 
         NSLayoutConstraint.activate([
-            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
+            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
 
-            recordButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 20),
-            recordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            recordButton.widthAnchor.constraint(equalToConstant: 200),
-            recordButton.heightAnchor.constraint(equalToConstant: 50),
+            vocabularyTextField.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
+            vocabularyTextField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            vocabularyTextField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
 
-            transcriptionTextView.topAnchor.constraint(equalTo: recordButton.bottomAnchor, constant: 20),
+            setVocabularyButton.topAnchor.constraint(equalTo: vocabularyTextField.bottomAnchor, constant: 10),
+            setVocabularyButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+
+            optionsStackView.topAnchor.constraint(equalTo: setVocabularyButton.bottomAnchor, constant: 10),
+            optionsStackView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            optionsStackView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            streamRecordButton.topAnchor.constraint(equalTo: optionsStackView.bottomAnchor, constant: 20),
+            streamRecordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            streamRecordButton.widthAnchor.constraint(equalToConstant: 200),
+            streamRecordButton.heightAnchor.constraint(equalToConstant: 44),
+
+            processBufferButton.topAnchor.constraint(equalTo: streamRecordButton.bottomAnchor, constant: 10),
+            processBufferButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            processBufferButton.widthAnchor.constraint(equalToConstant: 250),
+            processBufferButton.heightAnchor.constraint(equalToConstant: 44),
+
+            partialTranscriptLabel.topAnchor.constraint(equalTo: processBufferButton.bottomAnchor, constant: 10),
+            partialTranscriptLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            partialTranscriptLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            finalStreamTranscriptLabel.topAnchor.constraint(equalTo: partialTranscriptLabel.bottomAnchor, constant: 5),
+            finalStreamTranscriptLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            finalStreamTranscriptLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            transcriptionTextView.topAnchor.constraint(equalTo: finalStreamTranscriptLabel.bottomAnchor, constant: 10),
             transcriptionTextView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             transcriptionTextView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             transcriptionTextView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20)
         ])
     }
 
+    private func createHorizontalStack(_ views: [UIView]) -> UIStackView {
+        let stack = UIStackView(arrangedSubviews: views)
+        stack.axis = .horizontal
+        stack.spacing = 8
+        stack.alignment = .center
+        return stack
+    }
+
+    // MARK: - STT Initialization
     private func initializeSTT() {
         cactusSTTService = CactusSTTService()
-
-        // TODO: Replace with actual model path.
-        // This model should be bundled with the app or downloaded to a known location.
-        guard let modelPath = Bundle.main.path(forResource: "your_stt_model", ofType: "bin") else {
-            print("STT Model not found in bundle.")
-            statusLabel.text = "Error: STT Model not found. Please add it to the project and update the path."
-            recordButton.isEnabled = false
+        guard let modelPath = Bundle.main.path(forResource: "your_stt_model", ofType: "bin") else { // Ensure you have a model file
+            statusLabel.text = "Error: STT Model not found. Add to bundle."
+            streamRecordButton.isEnabled = false
+            processBufferButton.isEnabled = false
             return
         }
 
@@ -88,88 +243,248 @@ class ViewController: UIViewController {
                 guard let self = self else { return }
                 if let error = error {
                     self.statusLabel.text = "STT Init Error: \(error.localizedDescription)"
-                    self.recordButton.isEnabled = false
-                    print("STT Initialization Error: \(error.localizedDescription)")
+                    self.streamRecordButton.isEnabled = false
+                    self.processBufferButton.isEnabled = false
                 } else {
-                    self.statusLabel.text = "STT Initialized. Ready to record."
-                    self.recordButton.isEnabled = true
-                    print("STT Initialized Successfully")
-
-                    // Optional: Call setUserVocabulary if needed
-                    // self.cactusSTTService?.setUserVocabulary(vocabulary: ["custom word", "Cactus AI"], completion: { vocabError in
-                    //     if let vocabError = vocabError {
-                    //         print("Error setting vocab (placeholder): \(vocabError.localizedDescription)")
-                    //     } else {
-                    //         print("User vocabulary set (placeholder).")
-                    //     }
-                    // })
+                    self.statusLabel.text = "STT Initialized. Ready."
+                    self.streamRecordButton.isEnabled = true
+                    self.processBufferButton.isEnabled = true
                 }
             }
         }
     }
 
-    @objc private func recordButtonTapped() {
-        guard let sttService = cactusSTTService else {
-            statusLabel.text = "STT Service not available."
-            return
+    // MARK: - Audio Engine Setup
+    private func setupAudioEngine() {
+        audioInputNode = audioEngine.inputNode
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("Failed to set up audio session: \(error)")
+            statusLabel.text = "Audio session setup failed."
+        }
+    }
+
+    private func installTapAndPrepareEngine() throws {
+        let inputFormat = audioInputNode.inputFormat(forBus: 0)
+        // Ensure the tap format matches the desired format for Whisper (16kHz, mono, Float32)
+        // If not, an AVAudioConverter would be needed. For simplicity, assume input can provide this.
+        // Or, configure inputNode's output format if possible.
+        // Let's assume a common input format and convert in convertPCMBufferToFloatArray.
+
+        audioInputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] (buffer, time) in
+            guard let self = self, self.isStreamingActive else { return }
+            let samples = self.convertPCMBufferToFloatArray(buffer: buffer)
+            if !samples.isEmpty {
+                self.onAudioData(samples)
+            }
+        }
+        audioEngine.prepare()
+    }
+
+    private func convertPCMBufferToFloatArray(buffer: AVAudioPCMBuffer) -> [Float] {
+        guard let pcmFloatChannelData = buffer.floatChannelData else { return [] }
+        let channelCount = Int(buffer.format.channelCount)
+        let frameLength = Int(buffer.frameLength)
+        var result: [Float] = []
+        result.reserveCapacity(frameLength)
+
+        if channelCount > 0 { // Assuming mono, or take first channel
+            let channelData = pcmFloatChannelData[0]
+            for i in 0..<frameLength {
+                result.append(channelData[i])
+            }
+        }
+        return result
+    }
+
+    // MARK: - UI Actions
+    @objc private func sttOptionChanged(_ sender: UIView) {
+        if let uiSwitch = sender as? UISwitch {
+            if uiSwitch == tokenTimestampsSwitch {
+                sttOptions.tokenTimestamps = uiSwitch.isOn
+            } else if uiSwitch == noContextSwitch {
+                sttOptions.noContext = uiSwitch.isOn
+            } else if uiSwitch == speedUpSwitch {
+                sttOptions.speedUp = uiSwitch.isOn
+            }
+        } else if let slider = sender as? UISlider {
+            if slider == temperatureSlider {
+                sttOptions.temperature = slider.value
+                temperatureLabel.text = String(format: "Temp: %.2f", slider.value)
+            }
+        }
+    }
+
+    @objc private func setVocabularyButtonTapped() {
+        guard let sttService = cactusSTTService, sttService.isInitialized else {
+            statusLabel.text = "STT not initialized."; return
+        }
+        let vocabulary = vocabularyTextField.text ?? ""
+        sttService.setUserVocabulary(vocabulary: vocabulary) { [weak self] error in
+            DispatchQueue.main.async {
+                if let error = error { self?.statusLabel.text = "Vocab Error: \(error.localizedDescription)" }
+                else { self?.statusLabel.text = "STT vocabulary set: \(vocabulary.isEmpty ? "Cleared" : vocabulary)" }
+            }
+        }
+    }
+
+    @objc private func streamRecordButtonTapped() {
+        if isStreamingActive {
+            stopSttStream()
+        } else {
+            startSttStream()
+        }
+    }
+
+    @objc private func processDummyBufferTapped() {
+        guard let sttService = cactusSTTService, sttService.isInitialized else {
+            statusLabel.text = "STT not initialized for buffer processing."; return
+        }
+        // Create a dummy 1-second audio buffer (16000 samples of silence)
+        let dummySamples: [Float] = Array(repeating: 0.0, count: 16000)
+        statusLabel.text = "Processing dummy buffer with options..."
+        transcriptionTextView.text = ""
+
+        sttService.processAudioSamples(samples: dummySamples, options: sttOptions) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let transcript):
+                    self?.transcriptionTextView.text = "Buffer Result: \(transcript)"
+                    self?.statusLabel.text = "Dummy buffer processed."
+                case .failure(let error):
+                    self?.transcriptionTextView.text = "Buffer Error: \(error.localizedDescription)"
+                    self?.statusLabel.text = "Buffer processing failed."
+                }
+            }
+        }
+    }
+
+
+    // MARK: - STT Streaming Logic
+    func startSttStream() {
+        guard !isStreamingActive else { return }
+        guard let sttService = cactusSTTService, sttService.isInitialized else {
+            statusLabel.text = "STT not initialized for streaming."; return
         }
 
-        if isRecording {
-            sttService.stopVoiceCapture()
-            // UI update for stopping will be handled based on STT callbacks or state
-            // For now, just update button and status directly
-            recordButton.setTitle("Start Recording", for: .normal)
-            recordButton.backgroundColor = .systemBlue
-            statusLabel.text = "Stopping recording... Processing..."
-            // isRecording will be set to false by the STTService delegate/completion
-        } else {
-            // Request microphone permission before starting
-            AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    if granted {
-                        self.statusLabel.text = "Recording..."
-                        self.recordButton.setTitle("Stop Recording", for: .normal)
-                        self.recordButton.backgroundColor = .systemRed
-                        self.isRecording = true
-                        self.transcriptionTextView.text = "" // Clear previous transcription
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            guard let self = self else { return }
+            if !granted {
+                DispatchQueue.main.async { self.statusLabel.text = "Microphone permission denied."; }
+                return
+            }
 
-                        sttService.startVoiceCapture { [weak self] transcription, error in
-                            DispatchQueue.main.async {
-                                guard let self = self else { return }
-                                self.isRecording = false // Reset recording state from service callback
-                                self.recordButton.setTitle("Start Recording", for: .normal)
-                                self.recordButton.backgroundColor = .systemBlue
+            DispatchQueue.main.async {
+                self.isStreamingActive = true
+                self.partialTranscriptLabel.text = "Partial: "
+                self.finalStreamTranscriptLabel.text = "Final (Stream): Listening..."
+                self.streamRecordButton.setTitle("Stop Streaming", for: .normal)
+                self.streamRecordButton.backgroundColor = .systemRed
+                self.processBufferButton.isEnabled = false // Disable other STT while streaming
+            }
 
-                                if let error = error {
-                                    self.statusLabel.text = "STT Error: \(error.localizedDescription)"
-                                    self.transcriptionTextView.text = "Error: \(error.localizedDescription)"
-                                    print("Transcription Error: \(error.localizedDescription)")
-                                } else if let transcription = transcription {
-                                    self.statusLabel.text = "Transcription received."
-                                    self.transcriptionTextView.text = transcription
-                                    print("Transcription: \(transcription)")
-                                } else {
-                                    self.statusLabel.text = "Transcription complete (no text or error)."
-                                }
+            do {
+                try self.installTapAndPrepareEngine() // Ensure tap is installed before starting engine
+                try self.audioEngine.start()
+
+                try sttService.startStreamingSTT(
+                    options: self.sttOptions,
+                    onPartialResult: { [weak self] partial in
+                        DispatchQueue.main.async { self?.partialTranscriptLabel.text = "Partial: \(partial)" }
+                    },
+                    onFinalResult: { [weak self] result in
+                        DispatchQueue.main.async {
+                            guard let self = self else { return }
+                            switch result {
+                            case .success(let final):
+                                self.finalStreamTranscriptLabel.text = "Final (Stream): \(final)"
+                            case .failure(let error):
+                                self.finalStreamTranscriptLabel.text = "Stream Error: \(error.localizedDescription)"
+                            }
+                            self.partialTranscriptLabel.text = "Partial: "
+                            // Cleanup is handled by stopSttStream or if an error occurs during feed
+                            // self.stopSttStream() // Call stop explicitly if not already called
+                            if self.isStreamingActive { // Check if stop wasn't already triggered by an error
+                                self.stopSttStream(isCalledFromCallback: true)
                             }
                         }
-                    } else {
-                        self.statusLabel.text = "Microphone permission denied."
-                        print("Microphone permission denied.")
                     }
+                )
+                print("STT Streaming service started successfully.")
+            } catch {
+                print("Error starting STT stream or audio engine: \(error)")
+                DispatchQueue.main.async {
+                    self.isStreamingActive = false
+                    self.finalStreamTranscriptLabel.text = "Stream Start Error: \(error.localizedDescription)"
+                    self.streamRecordButton.setTitle("Start Streaming", for: .normal)
+                    self.streamRecordButton.backgroundColor = .systemGreen
+                    self.processBufferButton.isEnabled = true
+                    self.audioEngine.stop() // Ensure engine stops if it started
+                    self.audioInputNode.removeTap(onBus: 0)
                 }
             }
         }
     }
 
-    deinit {
-        cactusSTTService?.releaseSTT(completion: { error in
-            if let error = error {
-                print("Error releasing STT: \(error.localizedDescription)")
-            } else {
-                print("STT resources released.")
+    func onAudioData(_ samples: [Float]) {
+        guard isStreamingActive, let sttService = cactusSTTService else { return }
+        do {
+            try sttService.feedAudioChunk(samples: samples)
+        } catch {
+            print("Failed to feed audio chunk: \(error)")
+            DispatchQueue.main.async {
+                self.finalStreamTranscriptLabel.text = "Feed Error: \(error.localizedDescription)"
+                self.stopSttStream(isCalledFromCallback: true) // Stop stream on feed error
             }
-        })
+        }
+    }
+
+    func stopSttStream(isCalledFromCallback: Bool = false) {
+        if !isCalledFromCallback { // If called by user (button press)
+             guard isStreamingActive else { return }
+        }
+        // If called from callback, isStreamingActive might already be false by the time this executes
+        // but we still need to ensure engine and tap are stopped.
+
+        isRecording = false // Legacy flag, ensure it's false
+
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            audioInputNode.removeTap(onBus: 0)
+            print("Microphone streaming stopped.")
+        }
+
+        if let sttService = cactusSTTService, self.isStreamingActive { // Check isStreamingActive again before native call
+            do {
+                try sttService.stopStreamingSTT()
+                // Final result is handled by the onFinalResult callback in startStreamingSTT
+            } catch {
+                print("Error stopping STT stream: \(error)")
+                 DispatchQueue.main.async {
+                    self.finalStreamTranscriptLabel.text = (self.finalStreamTranscriptLabel.text ?? "").contains("Final") ? self.finalStreamTranscriptLabel.text : "Stop Error: \(error.localizedDescription)"
+                }
+            }
+        }
+
+        // Reset UI and state, unless this was called from a callback that already did it
+        if !isCalledFromCallback && mounted { // mounted check for safety
+             DispatchQueue.main.async { // Ensure UI updates on main thread
+                self.isStreamingActive = false // Ensure this is set
+                self.streamRecordButton.setTitle("Start Streaming", for: .normal)
+                self.streamRecordButton.backgroundColor = .systemGreen
+                self.processBufferButton.isEnabled = true
+                if !self.finalStreamTranscriptLabel.text!.contains("Final:") && !self.finalStreamTranscriptLabel.text!.contains("Error:") {
+                     self.finalStreamTranscriptLabel.text = "Final (Stream): Stopped."
+                }
+             }
+        } else if isCalledFromCallback && mounted { // If called from callback, ensure button state is reset
+             DispatchQueue.main.async {
+                self.streamRecordButton.setTitle("Start Streaming", for: .normal)
+                self.streamRecordButton.backgroundColor = .systemGreen
+                self.processBufferButton.isEnabled = true
+             }
+        }
     }
 }

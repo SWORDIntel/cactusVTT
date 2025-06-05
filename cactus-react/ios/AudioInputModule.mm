@@ -43,6 +43,29 @@ RCT_EXTERN_METHOD(processAudioFile:(NSString *)filePath
 RCT_EXTERN_METHOD(releaseSTT:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(setUserVocabulary:(NSString *)vocabulary
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// Method for processing audio with options
+RCT_EXTERN_METHOD(processAudioFileWithOptions:(NSString *)filePath
+                  options:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// Streaming STT Methods
+RCT_EXTERN_METHOD(startStreamingSTTNative:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(feedAudioChunkNative:(NSString *)audioDataBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(stopStreamingSTTNative:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+
 // If you had synchronous methods, they would be exposed like this:
 // RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(someSynchronousMethod)
 // However, all current methods are asynchronous and return Promises.

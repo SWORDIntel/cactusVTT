@@ -897,7 +897,152 @@ CACTUS_FFI_EXPORT void cactus_stt_free(cactus_stt_context_t* ctx) {
     }
 }
 
+CACTUS_FFI_EXPORT void cactus_stt_set_user_vocabulary(cactus_stt_context_t* ctx, const char* vocabulary) {
+    if (!ctx || !ctx->instance) {
+        // Optional: Log error if context or instance is null
+        // fprintf(stderr, "cactus_stt_set_user_vocabulary: STT context or instance is null.\n");
+        return;
+    }
+    if (!vocabulary) {
+        // Treat null vocabulary as a request to clear/reset the vocabulary
+        ctx->instance->setUserVocabulary("");
+        return;
+    }
+    ctx->instance->setUserVocabulary(vocabulary);
+}
+
+CACTUS_FFI_EXPORT cactus_stt_processing_params_c_t cactus_stt_default_processing_params_c() {
+    cactus::STTAdvancedParams cpp_params; // Uses C++ default constructor
+    cactus_stt_processing_params_c_t c_params;
+
+    c_params.n_threads = cpp_params.n_threads;
+    c_params.token_timestamps = cpp_params.token_timestamps;
+    c_params.temperature = cpp_params.temperature;
+    c_params.speed_up = cpp_params.speed_up;
+    c_params.audio_ctx = cpp_params.audio_ctx;
+    c_params.max_len = cpp_params.max_len;
+    c_params.max_tokens = cpp_params.max_tokens;
+    c_params.no_context = cpp_params.no_context;
+
+    return c_params;
+}
+
+CACTUS_FFI_EXPORT bool cactus_stt_process_audio_with_params_c(
+        cactus_stt_context_t* ctx,
+        const float* samples,
+        uint32_t num_samples,
+        const cactus_stt_processing_params_c_t* params_c) {
+    if (!ctx || !ctx->instance || !samples || !params_c) {
+        // Optional: Log error if context, instance, samples, or params_c is null
+        // fprintf(stderr, "cactus_stt_process_audio_with_params_c: Invalid argument(s).\n");
+        return false;
+    }
+    if (!ctx->instance->isInitialized()) {
+        // Optional: Log error
+        // fprintf(stderr, "cactus_stt_process_audio_with_params_c: STT context not initialized.\n");
+        return false;
+    }
+
+    cactus::STTAdvancedParams cpp_params; // Start with C++ defaults
+    cpp_params.n_threads = params_c->n_threads;
+    cpp_params.token_timestamps = params_c->token_timestamps;
+    cpp_params.temperature = params_c->temperature;
+    cpp_params.speed_up = params_c->speed_up;
+    cpp_params.audio_ctx = params_c->audio_ctx;
+    cpp_params.max_len = params_c->max_len;
+    cpp_params.max_tokens = params_c->max_tokens;
+    cpp_params.no_context = params_c->no_context;
+
+    std::vector<float> audio_vector(samples, samples + num_samples);
+    return ctx->instance->processAudioWithParams(audio_vector, cpp_params);
+}
+
 // --- End Speech-to-Text (STT) FFI Implementations ---
+
+// +++ Streaming STT FFI Implementations +++
+
+CACTUS_FFI_EXPORT bool cactus_stt_stream_start_c(
+    cactus_stt_context_t* ctx,
+    const cactus_stt_processing_params_c_t* params_c,
+    stt_partial_result_callback_c_t partial_callback,
+    void* partial_callback_user_data,
+    stt_final_result_callback_c_t final_callback,
+    void* final_callback_user_data) {
+
+    if (!ctx || !ctx->instance || !params_c) {
+        // fprintf(stderr, "cactus_stt_stream_start_c: Invalid argument(s).\n");
+        return false;
+    }
+    if (!ctx->instance->isInitialized()) {
+        // fprintf(stderr, "cactus_stt_stream_start_c: STT context not initialized.\n");
+        return false;
+    }
+
+    cactus::STTAdvancedParams cpp_adv_params;
+    cpp_adv_params.n_threads = params_c->n_threads;
+    cpp_adv_params.token_timestamps = params_c->token_timestamps;
+    cpp_adv_params.temperature = params_c->temperature;
+    cpp_adv_params.speed_up = params_c->speed_up;
+    cpp_adv_params.audio_ctx = params_c->audio_ctx;
+    cpp_adv_params.max_len = params_c->max_len;
+    cpp_adv_params.max_tokens = params_c->max_tokens;
+    cpp_adv_params.no_context = params_c->no_context;
+
+    cactus::STTPartialResultCallback cpp_partial_cb = nullptr;
+    if (partial_callback) {
+        cpp_partial_cb = [partial_callback, partial_callback_user_data](const std::string& transcript) {
+            partial_callback(transcript.c_str(), partial_callback_user_data);
+        };
+    }
+
+    cactus::STTFinalResultCallback cpp_final_cb = nullptr;
+    if (final_callback) {
+        cpp_final_cb = [final_callback, final_callback_user_data](const std::string& transcript) {
+            final_callback(transcript.c_str(), final_callback_user_data);
+        };
+    }
+
+    return ctx->instance->startStream(cpp_adv_params, cpp_partial_cb, cpp_final_cb);
+}
+
+CACTUS_FFI_EXPORT bool cactus_stt_stream_feed_audio_c(
+    cactus_stt_context_t* ctx,
+    const float* audio_data,
+    uint32_t num_samples) {
+
+    if (!ctx || !ctx->instance || (num_samples > 0 && !audio_data)) { // Allow num_samples = 0 with audio_data = null
+        // fprintf(stderr, "cactus_stt_stream_feed_audio_c: Invalid argument(s).\n");
+        return false;
+    }
+     if (!ctx->instance->isInitialized()) { // Though startStream should have checked this
+        // fprintf(stderr, "cactus_stt_stream_feed_audio_c: STT context not initialized.\n");
+        return false;
+    }
+
+    // Create vector only if there's data to process.
+    // The C++ processAudioChunk handles empty vector gracefully if called.
+    std::vector<float> audio_vector;
+    if (num_samples > 0 && audio_data) {
+        audio_vector.assign(audio_data, audio_data + num_samples);
+    }
+
+    return ctx->instance->processAudioChunk(audio_vector);
+}
+
+CACTUS_FFI_EXPORT bool cactus_stt_stream_finish_c(cactus_stt_context_t* ctx) {
+    if (!ctx || !ctx->instance) {
+        // fprintf(stderr, "cactus_stt_stream_finish_c: Invalid context.\n");
+        return false;
+    }
+    if (!ctx->instance->isInitialized()) {
+        // fprintf(stderr, "cactus_stt_stream_finish_c: STT context not initialized.\n");
+        return false;
+    }
+    return ctx->instance->finishStream();
+}
+
+// --- End Streaming STT FFI Implementations ---
+
 
 // +++ Benchmarking FFI Functions +++
 /**

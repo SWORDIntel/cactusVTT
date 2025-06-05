@@ -49,6 +49,80 @@ export type {
   VoiceToTextEventHandler,
 }
 
+/**
+ * Configuration options for Speech-to-Text (STT) processing.
+ *
+ * Use this interface to customize the behavior of the STT engine.
+ * For any parameter not explicitly provided, a default value from the
+ * underlying STT engine will be used.
+ */
+export interface SttOptions {
+  /**
+   * Number of threads to use for STT processing.
+   * If undefined, uses the engine's default.
+   */
+  nThreads?: number;
+
+  /**
+   * Whether to enable token-level timestamps.
+   * If undefined, uses the engine's default (false).
+   */
+  tokenTimestamps?: boolean;
+
+  /**
+   * Temperature for sampling during transcription.
+   * Higher values increase randomness.
+   * If undefined, uses the engine's default (0.0 for deterministic).
+   */
+  temperature?: number;
+
+  /**
+   * Whether to attempt to speed up audio processing.
+   * This might affect accuracy.
+   * If undefined, uses the engine's default (false).
+   */
+  speedUp?: boolean;
+
+  /**
+   * Audio context size (0 for full context).
+   * Can be reduced for performance.
+   * If undefined, uses the engine's default (0).
+   */
+  audioCtx?: number;
+
+  /**
+   * Maximum segment length in characters. 0 means no limit.
+   * If undefined, uses the engine's default (0).
+   */
+  maxLen?: number;
+
+  /**
+   * Maximum tokens per segment. 0 means no limit.
+   * If undefined, uses the engine's default (0).
+   */
+  maxTokens?: number;
+
+  /**
+   * If true, the STT engine will not use context from previous audio segments.
+   * Important for controlling context in streaming or independent audio chunks.
+   * If undefined, uses the engine's default (true, meaning no context carried over
+   * by default unless managed by streaming logic or other settings).
+   */
+  noContext?: boolean;
+
+  /**
+   * Target language for transcription. E.g., "en", "es".
+   * If undefined, the engine's default or auto-detection might be used.
+   */
+  language?: string;
+
+  /**
+   * Whether to translate the transcription to English.
+   * If undefined, uses the engine's default (false).
+   */
+  translate?: boolean;
+}
+
 export { SchemaGrammarConverter, convertJsonSchemaToGrammar, Tools, VoiceToText }
 
 const EVENT_ON_INIT_CONTEXT_PROGRESS = '@Cactus_onInitContextProgress'
