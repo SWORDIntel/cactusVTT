@@ -98,6 +98,7 @@ public class RNAudioInputModule extends ReactContextBaseJavaModule implements Au
             }
 
             // AudioInputModule's startRecording needs a Context. ApplicationContext is fine here.
+            Log.d(TAG, "RNAudioInputModule.startRecording called");
             audioInputModule.startRecording(currentContext);
             promise.resolve(true);
             Log.d(TAG, "Audio recording started via RNAudioInputModule.");
@@ -110,6 +111,7 @@ public class RNAudioInputModule extends ReactContextBaseJavaModule implements Au
     @ReactMethod
     public void stopRecording(Promise promise) {
         try {
+            Log.d(TAG, "RNAudioInputModule.stopRecording called");
             if (audioInputModule != null) {
                 audioInputModule.stopRecording();
                 Log.d(TAG, "Audio recording stopped via RNAudioInputModule.");

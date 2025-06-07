@@ -1272,6 +1272,7 @@ Java_com_cactus_CactusModule_nativeInitSTT(
         jniutils::rejectPromise(env, promise, "E_STT_INIT_PARAMS", "Model path or language is null.");
         return 0; // Return 0 for invalid context pointer
     }
+    LOGI("JNI: Java_com_cactus_CactusModule_nativeInitSTT called with model: %s, lang: %s", model_path_cstr, language_cstr);
     LOGI("nativeInitSTT called with modelPath: %s, language: %s", model_path_cstr, language_cstr);
 
     cactus_stt_context_t* stt_ctx = cactus_stt_init(model_path_cstr, language_cstr);
@@ -1343,6 +1344,7 @@ Java_com_cactus_CactusModule_nativeProcessAudioFile(
         jniutils::rejectPromise(env, promise, "E_JNI_PATH_STR_CONVERSION", "Failed to convert file path Java string to C string.");
         return nullptr;
     }
+    LOGI("JNI: Java_com_cactus_CactusModule_nativeProcessAudioFile called with path: %s", file_path_chars);
     LOGI("nativeProcessAudioFile called with filePath: %s for context: %p", file_path_chars, stt_ctx);
 
     // TODO: Implement actual audio file processing and STT
