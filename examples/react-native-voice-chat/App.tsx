@@ -8,306 +8,374 @@ import {
   PermissionsAndroid,
   Platform,
   TextInput,
-  EmitterSubscription,
-  NativeEventEmitter, // Import NativeEventEmitter
-  NativeModules, // Import NativeModules
+  ScrollView,
+  Switch,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
-import { VoiceToText } from 'cactus-react'; // Assuming cactus-react is linked
+import { VoiceToText, SttOptions } from 'cactus-react';
 
-// Get the AudioInputModule for direct event listening if VoiceToText doesn't re-emit all
-// This is a common pattern if the class itself doesn't manage all event types.
-const { AudioInputModule, CactusModule } = NativeModules;
+// It's good practice to define a specific path for your model
+// For example, if bundled in android assets or iOS bundle.
+// This path is a placeholder and needs to be replaced with your actual model path.
+const DEFAULT_MODEL_PATH = Platform.OS === 'ios' ? 'models/your_stt_model.bin' : 'models/your_stt_model.bin';
+// Ensure this model is bundled with your app or downloaded to a location
+// accessible by the native code. For Android, if using assets, the native code
+// part of cactus-react (specifically CactusModule.java/jni.cpp) would need to handle
+// asset extraction to a file path before passing to the C++ core.
 
 const App = () => {
-  const [voiceToText, setVoiceToText] = useState<VoiceToText | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [transcribedText, setTranscribedText] = useState('');
-  const [sttError, setSttError] = useState('');
-  const [sttModelPath, setSttModelPath] = useState<string | null>(null); // Example model path
-  const [sttVocabulary, setSttVocabulary] = useState(''); // For user vocabulary input
+  const [voiceToText] = useState(() => new VoiceToText());
 
-  // Listener subscriptions
-  let onAudioDataSubscription: EmitterSubscription | null = null;
-  let onErrorSubscription: EmitterSubscription | null = null;
-  let onTranscriptionSubscription: EmitterSubscription | null = null;
+  // STT State
+  const [isSttInitialized, setIsSttInitialized] = useState(false);
+  const [sttModelPath, setSttModelPath] = useState<string>(DEFAULT_MODEL_PATH); // User can change this if needed
+
+  const [isRecording, setIsRecording] = useState(false); // For original buffered recording
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  const [transcribedText, setTranscribedText] = useState(''); // For buffered result
+  const [partialTranscript, setPartialTranscript] = useState('');
+  const [finalTranscript, setFinalTranscript] = useState('');
+
+  const [accentVocabulary, setAccentVocabulary] = useState('');
+  const [sttOptions, setSttOptions] = useState<SttOptions>({
+    language: 'en',
+    translate: false,
+    temperature: 0.0,
+    noContext: true, // Default to true for isolated calls
+    tokenTimestamps: false,
+  });
+
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    // Initialize VoiceToText instance
-    const vtt = new VoiceToText();
-    setVoiceToText(vtt);
-
-    // IMPORTANT: Determine the correct event emitter
-    // VoiceToText class in cactus-react was written to use AudioInputModule for iOS events
-    // and CactusModule for Android events.
-    // If VoiceToText itself emits these events via its own Emitter, use that.
-    // Otherwise, listen to the native modules directly as shown here.
-    let eventEmitterSource;
-    if (Platform.OS === 'ios') {
-      eventEmitterSource = AudioInputModule;
-    } else if (Platform.OS === 'android') {
-      eventEmitterSource = CactusModule; // Assuming CactusModule handles STT events on Android
-    }
-
-    if (eventEmitterSource) {
-        const nativeEventEmitter = new NativeEventEmitter(eventEmitterSource);
-
-        // Listen for transcription results (if VoiceToText emits this)
-        // This is an example if your VoiceToText class emits 'onTranscription'
-        onTranscriptionSubscription = nativeEventEmitter.addListener('onTranscription', (event) => {
-          console.log('onTranscription event:', event);
-          if (event.transcription) {
-            setTranscribedText(event.transcription);
-            setSttError('');
-          }
-        });
-
-        // Fallback: Listen for onAudioData if onTranscription is not directly available
-        // or if you want to handle the raw file path from recording.
-        onAudioDataSubscription = nativeEventEmitter.addListener('onAudioData', async (event) => {
-            console.log('onAudioData event:', event);
-            if (event.filePath && vtt && sttModelPath) { // Ensure model is initialized
-                try {
-                    // This assumes processAudio in VoiceToText will trigger an onTranscription event
-                    // or directly return transcription. If it returns directly:
-                    // const transcription = await vtt.processAudio(event.filePath);
-                    // setTranscribedText(transcription);
-
-                    // If processAudio internally emits 'onTranscription', this listener above will catch it.
-                    // Otherwise, you might need to set state from a direct return value.
-                    await vtt.processAudio(event.filePath);
-                } catch (e: any) {
-                    console.error('Error processing audio data:', e);
-                    setSttError(e.message || 'Error processing audio data');
-                }
-            }
-        });
-
-        onErrorSubscription = nativeEventEmitter.addListener('onError', (error) => {
-            console.error('STT Native Module Error:', error);
-            setSttError(error.message || JSON.stringify(error));
-            setIsRecording(false);
-        });
-    }
-
-
-    // TODO: Set your actual STT model path here
-    // This could come from a config file, user input, or be bundled.
-    // For demonstration, we'll use a placeholder.
-    // Ensure this model is available on the device at the specified path.
-    const modelPath = Platform.OS === 'ios' ? 'path/to/your/stt_model.bin' : '/sdcard/stt_model.bin';
-    setSttModelPath(modelPath);
-
-    // Initialize STT engine when the component mounts and modelPath is known
-    // This is simplified; in a real app, you might init based on user action or app state.
-    // Also, ensure the model file exists at `modelPath` on the device.
-    if (vtt && modelPath) {
-        console.log(`Initializing STT with model: ${modelPath}`);
-        vtt.initSTT(modelPath)
-            .then(() => console.log('STT Engine Initialized'))
-            .catch(e => {
-                console.error('Failed to initialize STT:', e);
-                setSttError(e.message || 'Failed to init STT');
-            });
-    }
-
-    // Optional: Call setUserVocabulary if needed
-    // Example:
-    // if (vtt) {
-    //   vtt.setUserVocabulary("custom word, Cactus AI") // Pass as a single string
-    //     .then(() => console.log("User vocabulary set"))
-    //     .catch(e => console.error("Error setting user vocabulary:", e));
-    // }
-
-
+    // Cleanup on unmount
     return () => {
-      // Clean up listeners and VoiceToText instance
-      onAudioDataSubscription?.remove();
-      onErrorSubscription?.remove();
-      onTranscriptionSubscription?.remove();
-      voiceToText?.release();
+      voiceToText.cleanup();
     };
-  }, []); // Empty dependency array ensures this runs once on mount
+  }, [voiceToText]);
 
-  const requestPermissionsAndroid = async () => {
+  const handleInitSTT = async () => {
+    if (!sttModelPath) {
+      setError("Model path is not set.");
+      return;
+    }
+    setIsLoading(true);
+    setError('');
     try {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-        {
-          title: 'Microphone Permission',
-          message: 'This app needs access to your microphone for voice transcription.',
-          buttonNeutral: 'Ask Me Later',
-          buttonNegative: 'Cancel',
-          buttonPositive: 'OK',
-        },
-      );
-      return granted === PermissionsAndroid.RESULTS.GRANTED;
-    } catch (err) {
-      console.warn(err);
-      return false;
+      // Assuming initSTT in VoiceToText takes modelPath and language directly
+      // The SttOptions.language will be used for processing calls, not necessarily initial init
+      // unless the initSTT method itself is designed to take all these options.
+      // For this example, initSTT takes model path, and language option from sttOptions is used for processing.
+      // If initSTT itself needs the language, VoiceToText.ts's initSTT should be adapted.
+      // Let's assume VoiceToText.initSTT takes modelPath only, and language is set via options later.
+      await voiceToText.initSTT(sttModelPath); // Language is part of SttOptions for processing
+      setIsSttInitialized(true);
+      Alert.alert("Success", `STT Initialized with model: ${sttModelPath}. Language for processing: ${sttOptions.language || 'en'}`);
+    } catch (e: any) {
+      setError(e.message || 'Failed to initialize STT');
+      setIsSttInitialized(false);
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const handleToggleRecord = async () => {
-    if (!voiceToText || !sttModelPath) {
-      setSttError('VoiceToText service or model path not available.');
+  const handleSetAccentVocabulary = async () => {
+    if (!isSttInitialized) {
+      setError("STT not initialized. Cannot set vocabulary.");
       return;
     }
-
-    // Initialize STT if not already (idempotent check or rely on constructor init)
-    // For simplicity, assuming initSTT was called on mount. If not, call here:
-    // try {
-    //   await voiceToText.initSTT(sttModelPath);
-    // } catch (e: any) {
-    //   setSttError(`Failed to init STT: ${e.message}`);
-    //   return;
-    // }
-
-
-    let hasPermission = false;
     if (Platform.OS === 'android') {
-      hasPermission = await requestPermissionsAndroid();
-    } else if (Platform.OS === 'ios') {
-      // For iOS, requestPermissions is part of the VoiceToText class
-      hasPermission = await voiceToText.requestPermissions();
+      console.warn("setUserVocabulary may have limitations on Android due to native module setup.");
+      Alert.alert("Android Note", "setUserVocabulary may have limitations on Android due to native module setup.");
     }
+    setError('');
+    try {
+      await voiceToText.setUserVocabulary(accentVocabulary);
+      Alert.alert("Success", "Accent Vocabulary Set!");
+    } catch (e: any) { setError(e.message || 'Failed to set accent vocabulary'); }
+  };
 
-    if (!hasPermission) {
-      setSttError('Microphone permission denied.');
+  const handleProcessFileWithOptionsMenu = async () => {
+    if (!isSttInitialized) {
+      setError("STT not initialized. Cannot process file.");
+      return;
+    }
+    // This is a placeholder for file selection logic
+    const dummyFilePath = "path/to/dummy/audiofile.wav"; // Replace with actual file selection
+    Alert.alert("Process File", `This would process '${dummyFilePath}' with current SttOptions. Implement actual file picking and processing.`);
+
+    // Example call structure (uncomment and adapt when file path is real):
+    // setIsLoading(true);
+    // setError('');
+    // try {
+    //   const result = await voiceToText.processAudio(dummyFilePath, sttOptions);
+    //   setTranscribedText(result); // Show in the non-streaming text input
+    //   Alert.alert("Processing Complete", "File processed with options.");
+    // } catch (e:any) {
+    //   setError(e.message || "Failed to process file with options.");
+    // } finally {
+    //   setIsLoading(false);
+    // }
+  };
+
+  const handleToggleStreaming = async () => {
+    if (Platform.OS === 'android') {
+      setError("Streaming STT is not fully supported on Android in this example due to native module setup.");
+      Alert.alert("Android Note", "Streaming STT is not fully supported on Android in this example due to native module setup.");
+      return;
+    }
+    if (!isSttInitialized) {
+      setError("STT not initialized. Cannot start streaming.");
       return;
     }
 
-    if (isRecording) {
+    if (isStreaming) {
+      setIsLoading(true);
       try {
-        console.log('Stopping recording...');
-        // stop() should trigger onAudioData if successful, which then calls processAudio
-        await voiceToText.stop();
-        setIsRecording(false);
-        console.log('Recording stopped.');
+        await voiceToText.stopStreamingSTT();
+        // isStreaming state will be set to false by onFinal or onError callbacks from startStreamingSTT
+        // but we set it here to update UI immediately for button state.
+        // The final callback will also set it ensuring consistency.
+        // No, let the callback handle it to avoid race conditions on transcript display.
+        // setIsStreaming(false);
+        console.log("Stop streaming signal sent.");
       } catch (e: any) {
-        console.error('Failed to stop recording:', e);
-        setSttError(e.message || 'Failed to stop recording');
-        setIsRecording(false);
+        setError(e.message || 'Failed to stop stream');
+        setIsStreaming(false); // Force stop on error
+      } finally {
+        setIsLoading(false);
       }
     } else {
+      setPartialTranscript('');
+      setFinalTranscript('');
+      setError('');
+      setIsLoading(true);
       try {
-        setTranscribedText(''); // Clear previous transcription
-        setSttError('');
-        console.log('Starting recording...');
-        // Note: setUserVocabulary is now called via its own button.
-        // If needed before every recording, you could call it here,
-        // but that might be less user-friendly than a dedicated "Set" button.
-        await voiceToText.start();
-        setIsRecording(true);
-        console.log('Recording started.');
+        await voiceToText.startStreamingSTT(
+          sttOptions,
+          (partial) => {
+            // Append partial results for a continuous transcript feel
+            setPartialTranscript(prev => prev + partial);
+          },
+          (result) => { // This is onFinalResult
+            if (result.error) {
+              setError(result.error);
+            } else if (result.transcript !== undefined) {
+              setFinalTranscript(result.transcript);
+            }
+            setIsStreaming(false);
+            setIsLoading(false);
+            setPartialTranscript(''); // Clear partial on final
+          },
+          (err) => { // This is onStreamError
+             setError(err.message || JSON.stringify(err) || 'Streaming Error');
+             setIsStreaming(false);
+             setIsLoading(false);
+             setPartialTranscript('');
+          }
+        );
+        setIsStreaming(true);
       } catch (e: any) {
-        console.error('Failed to start recording:', e);
-        setSttError(e.message || 'Failed to start recording');
+        setError(e.message || 'Failed to start stream');
+        setIsStreaming(false);
+      } finally {
+        setIsLoading(false);
       }
     }
   };
 
-  const handleSetVocabulary = async () => {
-    if (!voiceToText) {
-      setSttError('VoiceToText service not available.');
-      return;
-    }
-    if (!voiceToText.modelPath) { // Check if STT is initialized (modelPath is set in VoiceToText upon init)
-        setSttError('STT is not initialized. Initialize STT before setting vocabulary.');
-        return;
-    }
-    try {
-      console.log(`Setting STT vocabulary to: "${sttVocabulary}"`);
-      await voiceToText.setUserVocabulary(sttVocabulary); // Method updated to take string
-      console.log('STT vocabulary set successfully via VoiceToText.');
-      alert('STT Vocabulary Set!');
-      // Reminder: Android native part for this call is likely not fully functional
-      // due to earlier identified issues with finding/updating CactusModule.java.
-    } catch (e: any) {
-      console.error('Failed to set STT vocabulary:', e);
-      setSttError(e.message || 'Failed to set STT vocabulary');
-      alert(`Error setting vocabulary: ${e.message}`);
-    }
-  };
+  const renderSttOptions = () => (
+    <View style={styles.optionsContainer}>
+      <Text style={styles.subtitle}>STT Options</Text>
+      <View style={styles.optionRow}>
+        <Text style={styles.optionLabel}>Language:</Text>
+        <TextInput
+          style={styles.optionInput}
+          value={sttOptions.language}
+          onChangeText={lang => setSttOptions(prev => ({...prev, language: lang || undefined}))}
+          placeholder="e.g., en, da"
+        />
+      </View>
+      <Button title="Initialize STT Engine" onPress={handleInitSTT} disabled={isLoading || !sttModelPath} />
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>React Native Voice Chat</Text>
-      <TouchableOpacity
-        style={[styles.button, isRecording ? styles.buttonRecording : styles.buttonNotRecording]}
-        onPress={handleToggleRecord}
-        disabled={!sttModelPath} // Disable if model path not set (STT not ready)
-        >
-        <Text style={styles.buttonText}>
-          {isRecording ? 'Stop Recording' : 'Start Recording'}
-        </Text>
-      </TouchableOpacity>
-
-      <Text style={styles.label}>Custom STT Vocabulary (Optional):</Text>
+      <View style={styles.optionRow}>
+        <Text style={styles.optionLabel}>Translate to English:</Text>
+        <Switch
+          value={sttOptions.translate || false}
+          onValueChange={val => setSttOptions(prev => ({...prev, translate: val}))}
+        />
+      </View>
+      <View style={styles.optionRow}>
+        <Text style={styles.optionLabel}>Token Timestamps:</Text>
+        <Switch
+          value={sttOptions.tokenTimestamps || false}
+          onValueChange={val => setSttOptions(prev => ({...prev, tokenTimestamps: val}))}
+        />
+      </View>
+      <View style={styles.optionRow}>
+        <Text style={styles.optionLabel}>No Context:</Text>
+        <Switch
+          value={sttOptions.noContext || false} // Default for isolated calls is often true
+          onValueChange={val => setSttOptions(prev => ({...prev, noContext: val}))}
+        />
+      </View>
+      <View style={styles.optionRow}>
+        <Text style={styles.optionLabel}>Temperature: {sttOptions.temperature?.toFixed(2) ?? '0.00'}</Text>
+      </View>
+      <Slider
+          minimumValue={0.0}
+          maximumValue={1.0}
+          step={0.05}
+          value={sttOptions.temperature || 0.0}
+          onValueChange={val => setSttOptions(prev => ({...prev, temperature: val}))}
+        />
       <TextInput
         style={styles.vocabularyInput}
-        value={sttVocabulary}
-        onChangeText={setSttVocabulary}
-        placeholder="e.g., specific names, jargon"
+        value={accentVocabulary}
+        onChangeText={setAccentVocabulary}
+        placeholder="Accent-specific vocabulary (English phrases)"
       />
-      <TouchableOpacity
-        style={[styles.button, styles.buttonSmall]}
-        onPress={handleSetVocabulary}
-        disabled={!voiceToText || !sttModelPath}
-      >
-        <Text style={styles.buttonText}>Set STT Vocabulary</Text>
-      </TouchableOpacity>
+      <Button title="Set Accent Vocabulary" onPress={handleSetAccentVocabulary} disabled={isLoading || !isSttInitialized} />
+    </View>
+  );
 
-      <Text style={styles.label}>Transcription:</Text>
-      <TextInput
-        style={styles.textInput}
-        value={transcribedText}
-        onChangeText={setTranscribedText}
-        placeholder="Transcribed text will appear here..."
-        multiline
-      />
-      {sttError ? <Text style={styles.errorText}>{sttError}</Text> : null}
-      {!sttModelPath && <Text style={styles.errorText}>STT Model path not set. Voice input disabled.</Text>}
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title}>Cactus React Native STT Demo</Text>
+
+        {isLoading && <ActivityIndicator size="large" color="#0000ff" />}
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+        {renderSttOptions()}
+
+        <View style={styles.buttonsContainer}>
+          <TouchableOpacity
+            style={[styles.button, isStreaming ? styles.buttonStreaming : styles.buttonNotStreaming]}
+            onPress={handleToggleStreaming}
+            disabled={isLoading || !isSttInitialized}
+          >
+            <Text style={styles.buttonText}>
+              {isStreaming ? 'Stop Streaming' : 'Start Streaming'}
+            </Text>
+          </TouchableOpacity>
+          <Button title="Process File w/ Options" onPress={handleProcessFileWithOptionsMenu} disabled={isLoading || !isSttInitialized} />
+        </View>
+
+        <Text style={styles.label}>Partial Transcript (Streaming):</Text>
+        <Text style={styles.transcriptText}>{partialTranscript}</Text>
+
+        <Text style={styles.label}>Final Transcript (Streaming):</Text>
+        <Text style={[styles.transcriptText, styles.boldText]}>{finalTranscript}</Text>
+
+        <Text style={styles.label}>Transcription (File/Buffered):</Text>
+        <TextInput
+          style={styles.textInput}
+          value={transcribedText}
+          onChangeText={setTranscribedText} // Allow editing if needed, or set editable={false}
+          placeholder="Transcribed text from file/buffered recording..."
+          multiline
+        />
+      </ScrollView>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: '#f0f0f0' },
   container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
     padding: 20,
-    backgroundColor: '#f0f0f0',
   },
   title: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: 'bold',
     marginBottom: 20,
+    textAlign: 'center',
+  },
+  subtitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  optionsContainer: {
+    marginBottom: 20,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 5,
+  },
+  optionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  optionLabel: {
+    fontSize: 16,
+  },
+  optionInput: {
+    flex: 1,
+    marginLeft: 10,
+    borderColor: 'gray',
+    borderWidth: 1,
+    padding: 5,
+    borderRadius: 3,
+  },
+  vocabularyInput: {
+    width: '100%',
+    height: 40,
+    borderColor: '#ced4da',
+    borderWidth: 1,
+    borderRadius: 5,
+    paddingHorizontal: 10,
+    backgroundColor: 'white',
+    marginBottom: 10,
+  },
+  buttonsContainer: {
+    marginVertical: 10,
   },
   button: {
-    paddingVertical: 15,
-    paddingHorizontal: 30,
-    borderRadius: 25,
-    marginBottom: 20,
-    elevation: 3,
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    shadowOffset: { width: 0, height: 2 },
+    paddingVertical: 12,
+    paddingHorizontal: 25,
+    borderRadius: 8,
+    marginBottom: 10,
+    alignItems: 'center',
   },
-  buttonRecording: {
-    backgroundColor: '#e74c3c', // Red when recording
+  buttonStreaming: {
+    backgroundColor: '#e74c3c',
   },
-  buttonNotRecording: {
-    backgroundColor: '#3498db', // Blue when not recording
+  buttonNotStreaming: {
+    backgroundColor: '#2ecc71',
   },
   buttonText: {
     color: 'white',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '500',
   },
-  textInput: {
+  label: {
+    fontSize: 16,
+    fontWeight: '500',
+    marginTop: 15,
+    marginBottom: 5,
+  },
+  transcriptText: {
+    fontSize: 14,
+    color: '#333',
+    marginBottom: 5,
+    padding: 5,
+    backgroundColor: '#fff',
+    borderRadius: 3,
+    minHeight: 30,
+  },
+  boldText: {
+    fontWeight: 'bold',
+  },
+  textInput: { // For non-streaming transcription display
     width: '100%',
-    height: 100,
+    minHeight: 80,
     borderColor: '#bdc3c7',
     borderWidth: 1,
     borderRadius: 5,
@@ -320,30 +388,8 @@ const styles = StyleSheet.create({
     color: '#c0392b',
     marginTop: 10,
     textAlign: 'center',
+    fontWeight: 'bold',
   },
-  label: {
-    fontSize: 16,
-    fontWeight: '500',
-    marginTop: 15,
-    marginBottom: 5,
-    alignSelf: 'flex-start',
-  },
-  vocabularyInput: {
-    width: '100%',
-    height: 50,
-    borderColor: '#ced4da',
-    borderWidth: 1,
-    borderRadius: 5,
-    paddingHorizontal: 10,
-    backgroundColor: 'white',
-    marginBottom: 10,
-  },
-  buttonSmall: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    marginBottom: 15,
-    backgroundColor: '#5cb85c', // A distinct color for this button
-  }
 });
 
 export default App;
