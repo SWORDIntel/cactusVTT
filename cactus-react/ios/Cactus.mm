@@ -13,6 +13,7 @@ static cactus_stt_context_t* g_stt_context_ios = nullptr;
 // C-style functions to be called from Swift via Bridging Header
 extern "C" {
     void* RN_STT_init(const char* model_path, const char* language) {
+        NSLog(@"[Cactus.mm] C: RN_STT_init called with model: %s, lang: %s", model_path, language);
         if (g_stt_context_ios != nullptr) {
             cactus_stt_free(g_stt_context_ios);
             g_stt_context_ios = nullptr;
@@ -40,6 +41,7 @@ extern "C" {
     // or this would take raw audio samples if design changes.
     // For now, let's assume it takes a path and returns a transcription string.
     const char* RN_STT_processAudioFile(void* stt_context_ptr, const char* file_path) {
+        NSLog(@"[Cactus.mm] C: RN_STT_processAudioFile called with path: %s", file_path);
         if (!stt_context_ptr || stt_context_ptr != g_stt_context_ios || !file_path) {
             return nullptr;
         }

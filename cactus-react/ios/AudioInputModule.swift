@@ -246,6 +246,7 @@ class AudioInputModule: RCTEventEmitter, AVAudioRecorderDelegate {
     // MARK: - STT Methods
     @objc(initSTT:language:resolver:rejecter:)
     func initSTT(_ modelPath: String, language: String? = "en", resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        NSLog("[AudioInputModule] Swift: initSTT called with modelPath: %@", modelPath)
         // ... (existing initSTT implementation, ensure isSttInitialized is set) ...
         print("[AudioInputModule] initSTT called with modelPath: \(modelPath), language: \(language ?? "en")")
         if self.sttContext != nil { RN_STT_free(self.sttContext); self.sttContext = nil }
@@ -268,6 +269,7 @@ class AudioInputModule: RCTEventEmitter, AVAudioRecorderDelegate {
 
     @objc(processAudioFileWithOptions:options:resolver:rejecter:)
     func processAudioFileWithOptions(filePath: String, options: [String: Any], resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        NSLog("[AudioInputModule] Swift: processAudioFileWithOptions called with filePath: %@", filePath)
         // ... (existing processAudioFileWithOptions, ensure it uses loadAudioSamplesFromFile if needed)
         guard let context = sttContext, isSttInitialized else { reject("stt_error", "STT not initialized", nil); return }
         let samples: [Float]; do { samples = try loadAudioSamplesFromFile(filePath: filePath) } catch { reject("audio_load_error", error.localizedDescription, error); return }
@@ -307,6 +309,7 @@ class AudioInputModule: RCTEventEmitter, AVAudioRecorderDelegate {
     // MARK: - Streaming STT Methods Implementation
     @objc(startStreamingSTTNative:resolver:rejecter:)
     func startStreamingSTTNative(options: [String: Any], resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        NSLog("[AudioInputModule] Swift: startStreamingSTTNative called")
         guard let context = sttContext, isSttInitialized else {
             reject("STT_INIT_ERROR", "STT not initialized.", nil); return
         }
